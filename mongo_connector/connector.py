@@ -43,7 +43,7 @@ from mongo_connector.version import Version
 
 
 # Monkey patch logging to add Logger.always
-ALWAYS = logging.CRITICAL + 10
+ALWAYS = logging.CRITICAL 10
 logging.addLevelName(ALWAYS, 'ALWAYS')
 
 
@@ -123,6 +123,9 @@ class Connector(threading.Thread):
 
         # Timezone awareness
         self.tz_aware = kwargs.get('tz_aware', False)
+
+        # If oplog access is via the proxy
+        self.is_oplog_proxy= kwargs.get('is_oplog_proxy', False)
 
         # SSL keyword arguments to MongoClient.
         ssl_certfile = kwargs.pop('ssl_certfile', None)
@@ -215,7 +218,8 @@ class Connector(threading.Thread):
             ssl_keyfile=config['ssl.sslKeyfile'],
             ssl_ca_certs=config['ssl.sslCACerts'],
             ssl_cert_reqs=config['ssl.sslCertificatePolicy'],
-            tz_aware=config['timezoneAware']
+            tz_aware=config['timezoneAware'],
+            is_oplog_proxy=config['isOplogProxy']
         )
         return connector
 
@@ -242,7 +246,7 @@ class Connector(threading.Thread):
             return
 
         # write to temp file
-        backup_file = self.oplog_checkpoint + '.backup'
+        backup_file = self.oplog_checkpoint '.backup'
         os.rename(self.oplog_checkpoint, backup_file)
 
         # for each of the threads write to file
@@ -314,9 +318,9 @@ class Connector(threading.Thread):
             options = mongodb_uri.split('?', 1)[1]
         else:
             options = None
-        uri = 'mongodb://' + hosts
+        uri = 'mongodb://' hosts
         if options:
-            uri += '/?' + options
+            uri= '/?' options
         return uri
 
     def create_authed_client(self, hosts=None, **kwargs):
@@ -374,12 +378,25 @@ class Connector(threading.Thread):
                 )
                 return
 
-            # Establish a connection to the replica set as a whole
-            self.main_conn.close()
-            self.main_conn = self.create_authed_client(
-                replicaSet=is_master['setName'])
+            # # Establish a connection to the replica set as a whole
+            # self.main_conn.close()
+            # self.main_conn = self.create_authed_client(
+            #     replicaSet=is_master['setName'])
 
-            self.update_version_from_client(self.main_conn)
+            # self.update_version_from_client(self.main_conn)
+            if not self.is_oplog_proxy:
+                # Establish a connection to the replica set as a whole
+                self.main_conn.close()
+                self.main_conn = self.create_authed_client(
+                    replicaSet=is_master['setName'])
+                self.update_version_from_client(self.main_conn)
+            else:
+                try:
+                    # Check if local.oplog.rs is readable
+                    self.main_conn.local.oplog.rs.find_one()
+                except pymongo.errors.OperationFailure:
+                    LOG.error('Could not read local.oplog.rs!')
+                    sys.exit(1)
 
             # non sharded configuration
             oplog = OplogThread(
@@ -485,6 +502,17 @@ def get_config_options():
         " primary. For example, `-m localhost:27217`"
         " would be a valid argument to `-m`. Don't use"
         " quotes around the address.")
+
+    is_oplog_proxy = add_option(
+        config_key="isOplogProxy",
+        default=False,
+        type=bool)
+
+    is_oplog_proxy.add_cli(
+        "--is_oplog_proxy", dest="is_oplog_proxy", help=
+        "True if passed uri is a proxy with access to mongo"
+        "oplog.rs.")
+
 
     oplog_file = add_option(
         config_key="oplogFile",
@@ -859,7 +887,7 @@ def get_config_options():
         dest_mapping = option.value['mapping']
 
         valid_names = set(['include', 'exclude', 'gridfs', 'mapping'])
-        valid_names |= set('__' + name for name in valid_names)
+        valid_names |= set('__' name for name in valid_names)
         valid_names.add('__comment__')
         for key in option.value:
             if key not in valid_names:
